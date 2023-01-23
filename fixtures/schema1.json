@@ -1,0 +1,8 @@
+{
+    "indexName": "amazon_products",
+    "fields": {
+        "product_name": {
+            "type": "TEXT"
+        }
+    }
+}

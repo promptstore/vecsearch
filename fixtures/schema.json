@@ -1,0 +1,21 @@
+{
+    "indexName": "amazon_products",
+    "fields": {
+        "product_name": {
+            "type": "TEXT"
+        },
+        "category": {
+            "type": "TAG",
+            "sortable": true
+        },
+        "selling_price": {
+            "type": "NUMERIC"
+        },
+        "about_product": {
+            "type": "TEXT"
+        },
+        "technical_details": {
+            "type": "TEXT"
+        }
+    }
+}
