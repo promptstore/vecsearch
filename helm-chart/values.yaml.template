@@ -1,0 +1,12 @@
+db:
+  user: ""
+  pass: ""
+
+minio:
+  access_key: "minio"
+  secret_key: "changeme"
+
+redis:
+  password: "changeme"
+
+container_registry:

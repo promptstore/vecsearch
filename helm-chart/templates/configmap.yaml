@@ -5,11 +5,11 @@ data:
   DBNAME: "vecsearch"
   PORT: "6010"
   DIALECT: "bq"
-  # PROJECT_ID: "anaml-dev-nonprod"
-  # KEY_FILENAME: "/usr/src/app/***REMOVED***"
-  PROJECT_ID: "anaml-demo-nonprod"
-  KEY_FILENAME: "/usr/src/app/***REMOVED***"
+  REDIS_HOST: "redis-stack-server.redis-stack.svc.cluster.local"
+  S3_ENDPOINT: "minio.minio.svc.cluster.local"
+  S3_PORT: "9000"
+  FILE_BUCKET: "vecsearch"
 kind: ConfigMap
 metadata:
   name: vecsearch
-  namespace: nudge
+  namespace: vecsearch

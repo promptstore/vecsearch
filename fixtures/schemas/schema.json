@@ -2,7 +2,7 @@
     "indexName": "amazon_products",
     "fields": {
         "product_name": {
-            "type": "TEXT"
+            "type": "VECTOR"
         },
         "category": {
             "type": "TAG",

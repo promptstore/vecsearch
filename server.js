@@ -1,5 +1,4 @@
 const Minio = require('minio');
-const algoliasearch = require('algoliasearch');
 const bodyParser = require('body-parser');
 const express = require('express');
 const expressWinston = require('express-winston');
@@ -9,28 +8,29 @@ const os = require('os');
 const uuid = require('node-uuid');
 const winston = require('winston');
 const { parse } = require('csv-parse');
-const { createClient, SchemaFieldTypes } = require('redis');
+const { createClient, SchemaFieldTypes, VectorAlgorithms } = require('redis');
 
-require('dotenv').config();
+require('@tensorflow/tfjs-node');
+const use = require('@tensorflow-models/universal-sentence-encoder');
 
-const logger = winston.createLogger({
-  level: 'debug',
-  format: winston.format.combine(
-    winston.format.splat(),
-    winston.format.simple(),
-  ),
-  transports: [
-    new winston.transports.Console(),
-  ],
-});
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
+
+const logger = require('./logger');
 
 logger.log('info', 'environment is "%s"', process.env.NODE_ENV);
+logger.log('info', 'redis host is "%s"', process.env.REDIS_HOST);
 
 const rc = createClient({
-  host: process.env.REDIS_HOST,
+  url: `redis://${process.env.REDIS_HOST}:6379`,
+  password: process.env.REDIS_PASSWORD,
 });
 
-rc.connect();
+rc.connect().catch((err) => {
+  logger.log('error', err);
+  process.exit(1);
+});
 
 const mc = new Minio.Client({
   endPoint: process.env.S3_ENDPOINT,
@@ -39,9 +39,6 @@ const mc = new Minio.Client({
   accessKey: process.env.AWS_ACCESS_KEY,
   secretKey: process.env.AWS_SECRET_KEY,
 });
-
-const algolia = algoliasearch('***REMOVED***', '***REMOVED***');
-const index = algolia.initIndex('instant_search');
 
 const constants = {
   'FILE_BUCKET': process.env.FILE_BUCKET,
@@ -76,68 +73,340 @@ app.use(expressWinston.logger({
 
 app.use(bodyParser.json({ limit: '25mb' }));
 
-app.listen(port, () => { logger.log('info', 'Listening on port %s', port); });
+let __model;
+
+logger.log('debug', 'Loading model...');
+use.load()
+  .then((model) => {
+    __model = model;
+    logger.log('debug', 'Model loaded!');
+
+    app.listen(port, () => { logger.log('info', 'Listening on port', port); });
+
+  })
+  .catch((err) => {
+    logger.log('error', err);
+  });
 
 app.get('/', (req, res) => {
   res.send('Hello from vecsearch');
 });
 
+const search = async (indexName, q, rest) => {
+  logger.log('debug', 'q: %s', q);
+  const index = await rc.ft.info('idx:' + indexName);
+  // logger.log('debug', 'index:', index);
+  const fields = index.attributes.reduce((a, x) => {
+    a[x.attribute] = {
+      type: x.type,
+      sortable: x.sortable,
+    };
+    return a;
+  }, {});
+  // logger.log('debug', 'fields:', fields);
+  const attrs = [];
+  for (const [k, v] of Object.entries(rest)) {
+    const val = fields[v]?.type === 'NUMERIC' ? `[${v} ${v}]` : v;
+    attrs.push(`@${k}:${val}`);
+  }
+  const vectorField = Object.entries(fields).find(([k, v]) => v.type === 'VECTOR');
+  // logger.debug('vectorField:', vectorField);
+  let query, result;
+  if (q && vectorField) {
+    const queryEmbeddings = await getEmbeddings(q);
+    query = `*=>[KNN 50 @${vectorField[0]} $BLOB as dist]`;
+    if (attrs.length) {
+      query += ' ' + attrs.join(' ');
+    }
+    logger.log('debug', 'query:', query);
+    const returnFields = Object.keys(fields).filter((f) => f !== vectorField[0]);
+    result = await rc.ft.search(
+      'idx:' + indexName,
+      query,
+      {
+        PARAMS: {
+          BLOB: float32Buffer(queryEmbeddings),
+        },
+        // ascending because we want the closest items
+        SORTBY: {
+          BY: 'dist',
+        },
+        DIALECT: 2,
+        RETURN: [...returnFields, 'dist']
+      }
+    );
+  } else if (q) {
+    query = q;
+    if (attrs.length) {
+      query += ' ' + attrs.join(' ');
+    }
+    logger.log('debug', 'query:', query);
+    result = await rc.ft.search(
+      'idx:' + indexName,
+      query
+    );
+  } else if (attrs.length) {
+    query += attrs.join(' ');
+    logger.log('debug', 'query:', query);
+    result = await rc.ft.search(
+      'idx:' + indexName,
+      query
+    );
+  }
+
+  if (!result) {
+    return [];
+  }
+
+  const hits = result.documents.map((x) => x.value);
+  // logger.log('debug', 'hits:', hits);
+  hits.sort((a, b) => parseFloat(a.dist) < parseFloat(b.dist) ? -1 : 1);
+  // logger.log('debug', 'hits:', hits);
+
+  return hits;
+};
+
+const parseFloat = (val) => {
+  try {
+    const f = parseFloat(val);
+    return f;
+  } catch (err) {
+    return 0;
+  }
+};
+
+const removeVectorFieldsFromSearchResults = (hits) => {
+  return hits.map((h) => {
+    return Object.entries(h).reduce((a, [k, v]) => {
+      if (!k.endsWith('_vec')) {
+        a[k] = v;
+      }
+      return a;
+    }, {});
+  });
+};
+
 app.get('/api/search', async (req, res) => {
   logger.log('debug', 'params: ', req.query);
-  const { indexName, q } = req.query;
+  const { indexName, q, ...rest } = req.query;
   try {
-    const result = await rc.ft.search(
-      'idx:' + indexName,
-      q
-    );
-    const hits = result.documents.map((x) => x.value);
-    res.json(hits);
+    const hits = await search(indexName, q, rest);
+    // logger.log('debug', 'hits:', hits);
+    const cleaned = removeVectorFieldsFromSearchResults(hits);
+    // logger.log('debug', 'cleaned:', cleaned);
+    res.json(cleaned);
   } catch (e) {
     logger.log('error', '%s\n%s', e, e.stack);
     res.status(500).json({
-      error: String(e),
+      error: { message: String(e) },
+    });
+  }
+});
+
+app.get('/api/index', async (req, res) => {
+  try {
+    const indexes = await rc.ft._list();
+    res.json(indexes);
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
+    });
+  }
+});
+
+app.get('/api/index/:name', async (req, res) => {
+  const { name } = req.params;
+  try {
+    const index = await rc.ft.info(name);
+    res.json(index);
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
+    });
+  }
+});
+
+app.put('/api/index', async (req, res) => {
+  const { fields, indexName } = req.body;
+  try {
+    const schema = getSchema(fields);
+    await rc.ft.alter('idx:' + indexName, schema);
+    res.sendStatus(200);
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
     });
   }
 });
 
 app.post('/api/index', async (req, res) => {
+  // logger.log('debug', 'body: ', req.body);
   const { fields, indexName } = req.body;
   try {
     const prefix = 'vs:' + indexName;
-    const schema = Object.entries(fields).reduce((a, [k, v]) => {
-      a[k] = {
-        type: getType(v.type),
-        sortable: !!v.sortable,
-      };
-      return a;
-    }, {});
+    const schema = getSchema(fields);
     schema['__uid'] = {
       type: 'TAG',
     };
     logger.log('debug', 'schema: ', schema);
 
-    // await rc.connect();
-
-    await rc.ft.create('idx:' + indexName, schema, {
+    const name = 'idx:' + indexName;
+    await rc.ft.create(name, schema, {
       ON: 'HASH',
       PREFIX: prefix,
     });
-    res.json({
-      status: 'OK',
-    });
+    const index = await rc.ft.info(name);
+    res.json(index);
   } catch (e) {
     if (e.message === 'Index already exists') {
-      logger.log('error', 'Index exists already, skipped creation.');
+      logger.log('error', 'Index already exists, skipped creation.');
+      res.status(400).json({
+        error: { message: e.message },
+      });
     } else {
       // Something went wrong, perhaps RediSearch isn't installed...
       logger.log('error', '%s\n%s', e, e.stack);
+      res.status(500).json({
+        error: { message: String(e) },
+      });
     }
-    res.status(500).json({
-      error: String(e),
-    });
   } finally {
-    // logger.log('debug', 'Disconnecting redis client');
-    // await rc.disconnect;
+    logger.log('debug', 'Disconnecting redis client');
+  }
+});
+
+app.delete('/api/index/:name', async (req, res) => {
+  const { name } = req.params;
+  try {
+    await rc.ft.dropIndex(name);
+    res.json({ status: 'OK' });
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
+    });
+  }
+});
+
+function deleteKeysByPattern(pattern) {
+  (async (match) => {
+    for await (const key of rc.scanIterator({ MATCH: match })) {
+      await rc.del(key);
+    }
+  })(pattern);
+}
+
+app.delete('/api/index/:name/data', async (req, res) => {
+  const { name } = req.params;
+  try {
+    const pattern = 'vs:' + name + ':*';
+    logger.log('debug', 'deleting pattern: %s', pattern);
+    deleteKeysByPattern(pattern);
+    res.json({ status: 'OK' });
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
+    });
+  }
+});
+
+app.post('/api/document', async (req, res) => {
+  const { documents, indexName } = req.body;
+  logger.log('debug', 'indexName: %s', indexName);
+  try {
+    for (const document of documents) {
+      // logger.log('debug', 'document:', document);
+      const fields = await getIndexFields(indexName);
+      const fieldNames = Object.keys(fields);
+      const prefix = 'vs:' + indexName;
+      const documentKeys = Object.keys(document);
+      const data = {};
+      // logger.log('debug', 'fields:', fields);
+      // logger.log('debug', 'fieldNames:', fieldNames);
+      // logger.log('debug', 'documentKeys:', documentKeys);
+      for (let j = 0; j < fieldNames.length; j++) {
+        const name = fieldNames[j];
+        const field = fields[name];
+        for (let i = 0; i < documentKeys.length; i++) {
+          const k = documentKeys[i];
+          const v = document[k];
+          if (field.type === 'VECTOR' && name.slice(0, -4) === k) {
+            const embeddings = await getEmbeddings(v);
+            data[name] = float32Buffer(embeddings);
+            break;
+          } else if (name === k.toLowerCase()) {
+            if (field.type === 'NUMERIC') {
+              data[name] = parseMaybeCurrency(v);
+            } else if (typeof v === 'boolean') {
+              data[name] = String(v);
+            } else {
+              data[name] = v;
+            }
+            break;
+          }
+        }
+      }
+      const uid = uuid.v4();
+      data['__uid'] = uid;
+      logger.log('debug', '\ndocument: %s\ndata: %s', document, data);
+      await rc.hSet(`${prefix}:${uid}`, data);
+    }
+    res.sendStatus(200);
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
+    });
+  }
+});
+
+app.delete('/api/indexes/:indexName/documents/:uid', async (req, res) => {
+  const { indexName, uid } = req.params;
+  const prefix = 'vs:' + indexName;
+  try {
+    await rc.del(`${prefix}:${uid}`);
+    res.sendStatus(200);
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
+    });
+  }
+});
+
+app.post('/api/bulk-delete', async (req, res) => {
+  const { indexName, uids } = req.body;
+  const prefix = 'vs:' + indexName;
+  try {
+    const promises = uids.map((uid) => rc.del(`${prefix}:${uid}`));
+    await Promise.all(promises);
+    res.sendStatus(200);
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
+    });
+  }
+});
+
+app.delete('/api/delete-matching', async (req, res) => {
+  const { indexName, q, ...rest } = req.query;
+  const prefix = 'vs:' + indexName;
+  try {
+    const hits = await search(indexName, q, rest);
+    const uids = hits.map(h => h.uid);
+    const promises = uids.map((uid) => rc.del(`${prefix}:${uid}`));
+    await Promise.all(promises);
+    res.sendStatus(200);
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
+    });
   }
 });
 
@@ -147,9 +416,6 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   const file = req.file;
   logger.log('debug', 'file: ', file);
   try {
-
-    // await rc.connect();
-
     const metadata = {
       'Content-Type': file.mimetype,
     };
@@ -160,31 +426,36 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
       }
       logger.log('info', 'File uploaded successfully.');
 
-      const index = await rc.ft.info('idx:' + indexName);
-      const fields = index.attributes.reduce((a, x) => {
-        a[x.attribute] = {
-          type: x.type,
-          sortable: x.sortable,
-        };
-        return a;
-      }, {});
-
+      const fields = await getIndexFields(indexName);
+      logger.log('debug', 'fields: ', fields);
+      const fieldNames = Object.keys(fields);
       const prefix = 'vs:' + indexName;
 
       let headers;
 
-      const addData = (row) => {
-        const data = headers.reduce((a, h, i) => {
-          const field = fields[h];
-          if (field) {
-            if (field.type === 'NUMERIC') {
-              a[h] = parseMaybeCurrency(row[i]);
-            } else {
-              a[h] = row[i].replace(/[^\w\s-]/gi, '');
+      const addData = async (row) => {
+        const data = {};
+        for (let j = 0; j < fieldNames.length; j++) {
+          const name = fieldNames[j];
+          const field = fields[name];
+          for (let i = 0; i < headers.length; i++) {
+            const h = headers[i];
+            if (field.type === 'VECTOR' && name.slice(0, -4) === h) {
+              const embeddings = await getEmbeddings(row[i]);
+              data[name] = float32Buffer(embeddings);
+              break;
+            } else if (name === h) {
+              if (field.type === 'NUMERIC') {
+                data[name] = parseMaybeCurrency(row[i]);
+              } else if (typeof v === 'boolean') {
+                data[name] = String(v);
+              } else {
+                data[name] = row[i];
+              }
+              break;
             }
           }
-          return a;
-        }, {});
+        }
         const uid = uuid.v4();
         data['__uid'] = uid;
         return rc.hSet(`${prefix}:${uid}`, data);
@@ -213,11 +484,10 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   } catch (e) {
     logger.log('error', '%s\n%s', e, e.stack);
     res.status(500).json({
-      error: String(e),
+      error: { message: String(e) },
     });
   } finally {
-    // logger.log('debug', 'Disconnecting redis client');
-    // await rc.disconnect;
+    logger.log('debug', 'Disconnecting redis client');
   }
 });
 
@@ -227,17 +497,16 @@ app.post('/api/search/:indexName', async (req, res, next) => {
   const { requests } = req.body;
   logger.log('debug', 'requests: ', requests);
   logger.log('debug', 'query: %s', requests[0].params.query);
-  // const result = await index.search(requests[0].params.query);
   const rawResult = await rc.ft.search(
     'idx:' + indexName,
     requests[0].params.query
   );
   logger.log('debug', 'rawResult: ', rawResult);
-  const result = formatAlgolia(requests, rawResult);
+  const result = formatAlgoliaResponse(requests, rawResult);
   res.json({ results: [result] });
 });
 
-const formatAlgolia = (requests, rawResult) => {
+const formatAlgoliaResponse = (requests, rawResult) => {
   const documents = rawResult.documents;
   const nbHits = documents.length;
   const hits = documents.map((doc) => doc.value).map((val) => ({
@@ -277,8 +546,72 @@ const formatAlgolia = (requests, rawResult) => {
   };
 };
 
+const float32Buffer = (arr) => {
+  return Buffer.from(new Float32Array(arr).buffer);
+};
+
+const getEmbeddings = async (text) => {
+  const model = await getModel();
+  const embeddings = await model.embed([text,]);
+  const values = embeddings.dataSync();
+  return Array.from(values);
+};
+
+const getIndexFields = async (indexName) => {
+  const index = await rc.ft.info('idx:' + indexName);
+  const fields = index.attributes.reduce((a, x) => {
+    a[x.attribute] = {
+      type: x.type,
+      sortable: x.sortable,
+    };
+    return a;
+  }, {});
+  return fields;
+};
+
+const getModel = async () => {
+  if (!__model) {
+    logger.log('debug', 'Loading model...');
+    try {
+      __model = await use.load();
+    } catch (err) {
+      logger.log('error', err);
+    }
+    logger.log('debug', 'Model loaded!');
+  }
+  return __model;
+};
+
+const getSchema = (fields) => {
+  return Object.entries(fields).reduce((a, [k, v]) => {
+    const type = getType(v.type);
+    if (v.type === 'VECTOR') {
+      a[k] = {
+        type: SchemaFieldTypes.TEXT,
+        sortable: !!v.sortable,
+      };
+      a[k + '_vec'] = {
+        type,
+        ALGORITHM: VectorAlgorithms.HNSW,
+        TYPE: 'FLOAT32',
+        DIM: 512,
+        DISTANCE_METRIC: 'COSINE',
+      };
+    } else {
+      a[k] = {
+        type,
+        sortable: !!v.sortable,
+      };
+    }
+    return a;
+  }, {});
+};
+
 const getType = (type) => {
   switch (type) {
+    case 'VECTOR':
+      return SchemaFieldTypes.VECTOR;
+
     case 'TEXT':
       return SchemaFieldTypes.TEXT;
 
@@ -294,8 +627,9 @@ const getType = (type) => {
 };
 
 const parseMaybeCurrency = (value) => {
-  if (typeof value === 'string') {
-    return Number(value.replace(/[^0-9.-]+/g, ''));
+  let num = value;
+  if (value && typeof value === 'string') {
+    num = Number(value.replace(/[^0-9.-]+/g, ''));
   }
-  return value;
+  return isNaN(num) ? 0 : num;
 };

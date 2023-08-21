@@ -4,3 +4,6 @@ node_modules/
 keys/
 volumes/
 *.csv
+build.sh
+helm-chart/values.yaml
+*.env

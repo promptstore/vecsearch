@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vecsearch
+  namespace: vecsearch
+spec:
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      imagePullSecrets:
+        - name: gcr-secret
+      containers:
+        - name: api
+          image: "{{ .Values.container_registry }}/vecsearch:0.1.7"
+          command: ["node"]
+          args: ["--unhandled-rejections=strict", "--trace-warnings", "server.js"]
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: DBHOST
+              valueFrom:
+                configMapKeyRef:
+                  key: DBHOST
+                  name: vecsearch
+            - name: DBPORT
+              valueFrom:
+                configMapKeyRef:
+                  key: DBPORT
+                  name: vecsearch
+            - name: DBNAME
+              valueFrom:
+                configMapKeyRef:
+                  key: DBNAME
+                  name: vecsearch
+            - name: PORT
+              valueFrom:
+                configMapKeyRef:
+                  key: PORT
+                  name: vecsearch
+            - name: DIALECT
+              valueFrom:
+                configMapKeyRef:
+                  key: DIALECT
+                  name: vecsearch
+            - name: PROJECT_ID
+              valueFrom:
+                configMapKeyRef:
+                  key: PROJECT_ID
+                  name: vecsearch
+            - name: KEY_FILENAME
+              valueFrom:
+                configMapKeyRef:
+                  key: KEY_FILENAME
+                  name: vecsearch
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  key: REDIS_HOST
+                  name: vecsearch
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  key: S3_ENDPOINT
+                  name: vecsearch
+            - name: S3_PORT
+              valueFrom:
+                configMapKeyRef:
+                  key: S3_PORT
+                  name: vecsearch
+            - name: FILE_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  key: FILE_BUCKET
+                  name: vecsearch
+            - name: DBUSER
+              valueFrom:
+                secretKeyRef:
+                  key: DBUSER
+                  name: vecsearch
+            - name: DBPASS
+              valueFrom:
+                secretKeyRef:
+                  key: DBPASS
+                  name: vecsearch
+            - name: AWS_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: AWS_ACCESS_KEY
+                  name: vecsearch
+            - name: AWS_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: AWS_SECRET_KEY
+                  name: vecsearch
+            # - name: REDIS_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       key: REDIS_PASSWORD
+            #       name: vecsearch

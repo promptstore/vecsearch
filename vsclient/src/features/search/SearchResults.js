@@ -1,4 +1,3 @@
-// import algoliasearch from 'algoliasearch/lite';
 import { Hits, InstantSearch, SearchBox } from 'react-instantsearch-hooks-web';
 
 import 'instantsearch.css/themes/satellite.css';
@@ -6,8 +5,6 @@ import 'instantsearch.css/themes/satellite.css';
 import {
   searchClient,
 } from './searchSlice';
-
-// const searchClient = algoliasearch('***REMOVED***', '***REMOVED***');
 
 function Hit({ hit }) {
   return (

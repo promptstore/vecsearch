@@ -1,0 +1,8 @@
+{
+    "indexName": "project-1",
+    "fields": {
+        "text": {
+            "type": "TEXT"
+        }
+    }
+}

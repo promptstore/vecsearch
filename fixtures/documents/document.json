@@ -1,0 +1,13 @@
+{
+    "indexName": "amazon_products",
+    "documents": [
+        {
+            "product_name": "Mudpuppy Bonjour Paris! Magnetic Figures",
+            "category": "Toys & Games | Building Toys | Building Sets",
+            "selling_price": "$14.77",
+            "list_price": "",
+            "about_product": "Make sure this fits by entering your model number. | Winner of the 2013 Tillywig Top Fun award",
+            "technical_details": "A set of Bonjour Paris! magnetic figures from Mudpuppy is a package full of portable fun. Dress two figures a la mode and place them in four background scenes, including the Eiffel Tower, Louvre Pyramid, cafe, and street with as patisserie. Illustrated by Bella Pilar. | 1.05 pounds (View shipping rates and policies)"
+        }
+    ]
+}
