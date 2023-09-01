@@ -92,8 +92,30 @@ app.get('/', (req, res) => {
   res.send('Hello from vecsearch');
 });
 
-const search = async (indexName, q, rest) => {
-  logger.log('debug', 'q: %s', q);
+app.post('/api/embeddings', async (req, res) => {
+  let { text } = req.body;
+  if (!Array.isArray(text)) {
+    text = [text];
+  }
+  logger.debug('text:', text);
+  const embeddings = [];
+  let i = 0;
+  for (const t of text) {
+    if (t) {
+      const embedding = await getEmbedding(text);
+      embeddings.push({
+        index: i,
+        object: 'embedding',
+        embedding,
+      });
+    }
+    i += 1;
+  }
+  res.json(embeddings);
+});
+
+const search = async (indexName, q, rest, limit = 5, getParents = false) => {
+  logger.log('debug', 'q:', q);
   const index = await rc.ft.info('idx:' + indexName);
   // logger.log('debug', 'index:', index);
   const fields = index.attributes.reduce((a, x) => {
@@ -110,11 +132,12 @@ const search = async (indexName, q, rest) => {
     attrs.push(`@${k}:${val}`);
   }
   const vectorField = Object.entries(fields).find(([k, v]) => v.type === 'VECTOR');
-  // logger.debug('vectorField:', vectorField);
+  logger.debug('vectorField:', vectorField);
   let query, result;
   if (q && vectorField) {
-    const queryEmbeddings = await getEmbeddings(q);
-    query = `*=>[KNN 50 @${vectorField[0]} $BLOB as dist]`;
+    const queryEmbedding = await getEmbedding(q);
+    logger.debug('query embedding:', float32Buffer(queryEmbedding));
+    query = `*=>[KNN ${limit} @${vectorField[0]} $BLOB as dist]`;
     if (attrs.length) {
       query += ' ' + attrs.join(' ');
     }
@@ -125,7 +148,7 @@ const search = async (indexName, q, rest) => {
       query,
       {
         PARAMS: {
-          BLOB: float32Buffer(queryEmbeddings),
+          BLOB: float32Buffer(queryEmbedding),
         },
         // ascending because we want the closest items
         SORTBY: {
@@ -161,9 +184,34 @@ const search = async (indexName, q, rest) => {
   const hits = result.documents.map((x) => x.value);
   // logger.log('debug', 'hits:', hits);
   hits.sort((a, b) => parseFloat(a.dist) < parseFloat(b.dist) ? -1 : 1);
-  // logger.log('debug', 'hits:', hits);
+  logger.log('debug', 'hits:', hits);
+
+  if (getParents) {
+    const proms = hits.flatMap(hit => getParentDocs(indexName, hit));
+    const docs = await Promise.all(proms);
+    return docs.map(d => d[0]).slice(0, limit);
+  }
 
   return hits;
+};
+
+const getParentDocs = async (indexName, hit) => {
+  logger.debug('hit:', hit);
+  if (!hit.content_parent_uids) {
+    return [];
+  }
+  const prefix = 'vs:' + indexName;
+  const docs = [];
+  const parent_uids = hit.content_parent_uids.split(',');
+  for (const parent_uid of parent_uids) {
+    const itemsStr = await rc.hGet(`${prefix}:parent:${parent_uid}`, 'items');
+    const items = itemsStr.split(',');
+    const proms = items.map(uid => rc.hGetAll(`${prefix}:${uid}`));
+    const chunks = await Promise.all(proms);
+    // logger.debug('chunks:', chunks);
+    docs.push({ uid: parent_uid, chunks: removeVectorFieldsFromSearchResults(chunks) });
+  }
+  return docs;
 };
 
 const parseFloat = (val) => {
@@ -188,9 +236,9 @@ const removeVectorFieldsFromSearchResults = (hits) => {
 
 app.get('/api/search', async (req, res) => {
   logger.log('debug', 'params: ', req.query);
-  const { indexName, q, ...rest } = req.query;
+  const { indexName, q, limit, getParents, ...rest } = req.query;
   try {
-    const hits = await search(indexName, q, rest);
+    const hits = await search(indexName, q, rest, limit, getParents);
     // logger.log('debug', 'hits:', hits);
     const cleaned = removeVectorFieldsFromSearchResults(hits);
     // logger.log('debug', 'cleaned:', cleaned);
@@ -314,19 +362,40 @@ app.delete('/api/index/:name/data', async (req, res) => {
   }
 });
 
+app.post('/api/parent-documents', async (req, res) => {
+  const { indexName, parentDocuments } = req.body;
+  const prefix = 'vs:' + indexName;
+  try {
+    for (const parent of parentDocuments) {
+      // logger.debug('parent doc:', parent);
+      const data = {
+        uid: parent.uid,
+        items: parent.items.join(','),
+      };
+      await rc.hSet(`${prefix}:parent:${parent.uid}`, data);
+    }
+    res.sendStatus(200);
+  } catch (e) {
+    logger.log('error', '%s\n%s', e, e.stack);
+    res.status(500).json({
+      error: { message: String(e) },
+    });
+  }
+});
+
 app.post('/api/document', async (req, res) => {
   const { documents, indexName } = req.body;
   logger.log('debug', 'indexName: %s', indexName);
+  const prefix = 'vs:' + indexName;
   try {
+    const fields = await getIndexFields(indexName);
+    const fieldNames = Object.keys(fields);
+    // logger.log('debug', 'fields:', fields);
+    // logger.log('debug', 'fieldNames:', fieldNames);
     for (const document of documents) {
       // logger.log('debug', 'document:', document);
-      const fields = await getIndexFields(indexName);
-      const fieldNames = Object.keys(fields);
-      const prefix = 'vs:' + indexName;
       const documentKeys = Object.keys(document);
       const data = {};
-      // logger.log('debug', 'fields:', fields);
-      // logger.log('debug', 'fieldNames:', fieldNames);
       // logger.log('debug', 'documentKeys:', documentKeys);
       for (let j = 0; j < fieldNames.length; j++) {
         const name = fieldNames[j];
@@ -335,11 +404,13 @@ app.post('/api/document', async (req, res) => {
           const k = documentKeys[i];
           const v = document[k];
           if (field.type === 'VECTOR' && name.slice(0, -4) === k) {
-            const embeddings = await getEmbeddings(v);
-            data[name] = float32Buffer(embeddings);
+            const embedding = await getEmbedding(v);
+            data[name] = float32Buffer(embedding);
             break;
           } else if (name === k.toLowerCase()) {
-            if (field.type === 'NUMERIC') {
+            if (Array.isArray(v)) {
+              data[name] = v.join(',');
+            } else if (field.type === 'NUMERIC') {
               data[name] = parseMaybeCurrency(v);
             } else if (typeof v === 'boolean') {
               data[name] = String(v);
@@ -350,9 +421,9 @@ app.post('/api/document', async (req, res) => {
           }
         }
       }
-      const uid = uuid.v4();
+      const uid = data.content_uid || uuid.v4();
       data['__uid'] = uid;
-      logger.log('debug', '\ndocument: %s\ndata: %s', document, data);
+      // logger.log('debug', '\ndocument: %s\ndata: %s', document, data);
       await rc.hSet(`${prefix}:${uid}`, data);
     }
     res.sendStatus(200);
@@ -441,7 +512,7 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
           for (let i = 0; i < headers.length; i++) {
             const h = headers[i];
             if (field.type === 'VECTOR' && name.slice(0, -4) === h) {
-              const embeddings = await getEmbeddings(row[i]);
+              const embeddings = await getEmbedding(row[i]);
               data[name] = float32Buffer(embeddings);
               break;
             } else if (name === h) {
@@ -550,9 +621,12 @@ const float32Buffer = (arr) => {
   return Buffer.from(new Float32Array(arr).buffer);
 };
 
-const getEmbeddings = async (text) => {
+const getEmbedding = async (text) => {
   const model = await getModel();
-  const embeddings = await model.embed([text,]);
+  if (!Array.isArray(text)) {
+    text = [text];
+  }
+  const embeddings = await model.embed(text);
   const values = embeddings.dataSync();
   return Array.from(values);
 };
@@ -595,7 +669,7 @@ const getSchema = (fields) => {
         ALGORITHM: VectorAlgorithms.HNSW,
         TYPE: 'FLOAT32',
         DIM: 512,
-        DISTANCE_METRIC: 'COSINE',
+        DISTANCE_METRIC: 'L2',
       };
     } else {
       a[k] = {
