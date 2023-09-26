@@ -3,7 +3,7 @@ data:
   DBHOST: "postgres-postgresql.pgdatabase.svc.cluster.local"
   DBPORT: "5432"
   DBNAME: "vecsearch"
-  PORT: "6010"
+  PORT: "5002"
   DIALECT: "bq"
   REDIS_HOST: "redis-stack-server.redis-stack.svc.cluster.local"
   S3_ENDPOINT: "minio.minio.svc.cluster.local"
@@ -11,5 +11,5 @@ data:
   FILE_BUCKET: "vecsearch"
 kind: ConfigMap
 metadata:
-  name: vecsearch
-  namespace: vecsearch
+  name: "{{ .Values.app }}"
+  namespace: "{{ .Values.namespace }}"

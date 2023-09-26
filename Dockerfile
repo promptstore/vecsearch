@@ -16,6 +16,6 @@ RUN npm install
 COPY ./server.js .
 COPY ./logger.js .
 
-EXPOSE 6010
+EXPOSE 5002
 
 CMD [ "node", "server.js", "--unhandled-rejections=strict", "--trace-warnings" ]

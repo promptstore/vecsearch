@@ -1,8 +1,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vecsearch
-  namespace: vecsearch
+  name: "{{ .Values.app }}"
+  namespace: "{{ .Values.namespace }}"
 spec:
   selector:
     matchLabels:
@@ -16,7 +16,7 @@ spec:
         - name: gcr-secret
       containers:
         - name: api
-          image: "{{ .Values.container_registry }}/vecsearch:0.1.7"
+          image: "{{ .Values.container_registry }}/{{ .Values.app }}:{{ .Values.version }}"
           command: ["node"]
           args: ["--unhandled-rejections=strict", "--trace-warnings", "server.js"]
           env:
@@ -47,16 +47,16 @@ spec:
                 configMapKeyRef:
                   key: DIALECT
                   name: vecsearch
-            - name: PROJECT_ID
-              valueFrom:
-                configMapKeyRef:
-                  key: PROJECT_ID
-                  name: vecsearch
-            - name: KEY_FILENAME
-              valueFrom:
-                configMapKeyRef:
-                  key: KEY_FILENAME
-                  name: vecsearch
+            # - name: PROJECT_ID
+            #   valueFrom:
+            #     configMapKeyRef:
+            #       key: PROJECT_ID
+            #       name: vecsearch
+            # - name: KEY_FILENAME
+            #   valueFrom:
+            #     configMapKeyRef:
+            #       key: KEY_FILENAME
+            #       name: vecsearch
             - name: REDIS_HOST
               valueFrom:
                 configMapKeyRef:

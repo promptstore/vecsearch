@@ -1,3 +1,10 @@
 #!/usr/bin/env bash
 
-helm3 upgrade vecsearch -n vecsearch --set db.user="${DBUSER}" --set db.pass="${DBPASS}" ./helm-chart
+app=$HELM_APP_NAME
+ns=$K8S_NAMESPACE
+context=$K8S_CONTEXT
+
+kubectl config use-context $context
+kubectl config set-context --current --namespace="${ns}"
+
+helm upgrade --install $app -n $ns --set db.user="${DBUSER}" --set db.pass="${DBPASS}" -f $HELM_VALUES_FILE ./helm-chart

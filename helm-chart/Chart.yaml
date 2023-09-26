@@ -2,4 +2,4 @@ apiVersion: v1
 appVersion: "0.1"
 description: A Helm chart for Europa Vector Search
 name: vecsearch
-version: 0.1.7
+version: 0.1.9

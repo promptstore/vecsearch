@@ -1,3 +1,7 @@
+app: "vecsearch"
+namespace: "vecsearch"
+version: "0.1.9"
+
 db:
   user: ""
   pass: ""

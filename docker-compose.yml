@@ -49,12 +49,12 @@ services:
     <<: *defaults
     build: .
     ports:
-      - 5000:5000
+      - 5002:5002
     env_file:
       - .env
     environment:
       ENVIRON: prod
-      PORT: 5000
+      PORT: 5002
     depends_on:
       - redis
     networks:

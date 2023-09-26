@@ -47,7 +47,7 @@ const constants = {
 const upload = multer({ dest: os.tmpdir() });
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 5002;
 
 const assignId = (req, res, next) => {
   req.id = uuid.v4();
@@ -81,11 +81,11 @@ use.load()
     __model = model;
     logger.log('debug', 'Model loaded!');
 
-    app.listen(port, () => { logger.log('info', 'Listening on port', port); });
+    app.listen(port, '0.0.0.0', () => { logger.log('info', 'Listening on port', port); });
 
   })
   .catch((err) => {
-    logger.log('error', err);
+    logger.log('error', err, err.stack);
   });
 
 app.get('/', (req, res) => {
