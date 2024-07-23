@@ -19,6 +19,8 @@ if (process.env.NODE_ENV !== 'production') {
 
 const logger = require('./logger');
 
+const INDEX_NAME_PREFIX = 'idx';
+
 logger.log('info', 'environment is "%s"', process.env.NODE_ENV);
 logger.log('info', 'redis host is "%s"', process.env.REDIS_HOST);
 
@@ -114,9 +116,10 @@ app.post('/api/embeddings', async (req, res) => {
   res.json(embeddings);
 });
 
-const search = async (indexName, q, rest, limit = 5, getParents = false) => {
+const search = async (indexName, q, rest, logicalType = 'and', limit = 10, getParents = false) => {
   logger.log('debug', 'q:', q);
-  const index = await rc.ft.info('idx:' + indexName);
+  const name = `${INDEX_NAME_PREFIX}:${indexName}`;
+  const index = await rc.ft.info(name);
   // logger.log('debug', 'index:', index);
   const fields = index.attributes.reduce((a, x) => {
     a[x.attribute] = {
@@ -125,26 +128,43 @@ const search = async (indexName, q, rest, limit = 5, getParents = false) => {
     };
     return a;
   }, {});
-  // logger.log('debug', 'fields:', fields);
+  logger.log('debug', 'fields:', fields);
+  logger.log('debug', 'rest:', rest);
   const attrs = [];
   for (const [k, v] of Object.entries(rest)) {
-    const val = fields[v]?.type === 'NUMERIC' ? `[${v} ${v}]` : v;
-    attrs.push(`@${k}:${val}`);
+    const field = fields[k];
+    if (field) {
+      const type = field.type;
+      if (type === 'NUMERIC') {
+        attrs.push(`@${k}:[${v} ${v}]`);
+      } else if (type === 'TAG') {
+        attrs.push(`@${k}:{${v}}`);
+      } else {
+        attrs.push(`@${k}:${v}`);
+      }
+    }
   }
+  logger.debug('attrs:', attrs);
   const vectorField = Object.entries(fields).find(([k, v]) => v.type === 'VECTOR');
-  logger.debug('vectorField:', vectorField);
+  // logger.debug('vectorField:', vectorField);
   let query, result;
   if (q && vectorField) {
     const queryEmbedding = await getEmbedding(q);
-    logger.debug('query embedding:', float32Buffer(queryEmbedding));
-    query = `*=>[KNN ${limit} @${vectorField[0]} $BLOB as dist]`;
+    // logger.debug('query embedding:', float32Buffer(queryEmbedding));
     if (attrs.length) {
-      query += ' ' + attrs.join(' ');
+      if (logicalType === 'or') {
+        query = `(${attrs.map(a => `(${a})`).join(' | ')})`;
+      } else {
+        query = `(${attrs.join(' ')})`;
+      }
+    } else {
+      query = '*';
     }
+    query += `=>[KNN ${limit} @${vectorField[0]} $BLOB as dist]`;
     logger.log('debug', 'query:', query);
     const returnFields = Object.keys(fields).filter((f) => f !== vectorField[0]);
     result = await rc.ft.search(
-      'idx:' + indexName,
+      name,
       query,
       {
         PARAMS: {
@@ -161,18 +181,22 @@ const search = async (indexName, q, rest, limit = 5, getParents = false) => {
   } else if (q) {
     query = q;
     if (attrs.length) {
-      query += ' ' + attrs.join(' ');
+      if (logicalType === 'or') {
+        query += ` (${attrs.map(a => `(${a})`).join(' | ')})`;
+      } else {
+        query += ' ' + attrs.join(' ');
+      }
     }
     logger.log('debug', 'query:', query);
     result = await rc.ft.search(
-      'idx:' + indexName,
+      name,
       query
     );
   } else if (attrs.length) {
     query += attrs.join(' ');
     logger.log('debug', 'query:', query);
     result = await rc.ft.search(
-      'idx:' + indexName,
+      name,
       query
     );
   }
@@ -180,11 +204,9 @@ const search = async (indexName, q, rest, limit = 5, getParents = false) => {
   if (!result) {
     return [];
   }
-
   const hits = result.documents.map((x) => x.value);
-  // logger.log('debug', 'hits:', hits);
-  hits.sort((a, b) => parseFloat(a.dist) < parseFloat(b.dist) ? -1 : 1);
   logger.log('debug', 'hits:', hits);
+  hits.sort((a, b) => parseFloat(a.dist) < parseFloat(b.dist) ? -1 : 1);
 
   if (getParents) {
     const proms = hits.flatMap(hit => getParentDocs(indexName, hit));
@@ -234,14 +256,32 @@ const removeVectorFieldsFromSearchResults = (hits) => {
   });
 };
 
+const parseObjectValues = (hits) => {
+  return hits.map((h) => {
+    return Object.entries(h).reduce((a, [k, v]) => {
+      if (v && typeof v === 'string' && ['{', '[', '"'].includes(v.charAt(0))) {
+        try {
+          a[k] = JSON.parse(v);
+        } catch (err) {
+          a[k] = v;
+        }
+      } else {
+        a[k] = v;
+      }
+      return a;
+    }, {});
+  });
+};
+
 app.get('/api/search', async (req, res) => {
   logger.log('debug', 'params: ', req.query);
-  const { indexName, q, limit, getParents, ...rest } = req.query;
+  const { indexName, q, logicalType, limit, getParents, ...rest } = req.query;
   try {
-    const hits = await search(indexName, q, rest, limit, getParents);
+    const hits = await search(indexName, q, rest, logicalType, limit, getParents);
     // logger.log('debug', 'hits:', hits);
-    const cleaned = removeVectorFieldsFromSearchResults(hits);
-    // logger.log('debug', 'cleaned:', cleaned);
+    let cleaned = removeVectorFieldsFromSearchResults(hits);
+    cleaned = parseObjectValues(cleaned);
+    logger.log('debug', 'cleaned:', cleaned);
     res.json(cleaned);
   } catch (e) {
     logger.log('error', '%s\n%s', e, e.stack);
@@ -265,8 +305,9 @@ app.get('/api/index', async (req, res) => {
 
 app.get('/api/index/:name', async (req, res) => {
   const { name } = req.params;
+  logger.debug('Get index with name:', name);
   try {
-    const index = await rc.ft.info(name);
+    const index = await rc.ft.info(`${INDEX_NAME_PREFIX}:${name}`);
     res.json(index);
   } catch (e) {
     logger.log('error', '%s\n%s', e, e.stack);
@@ -280,7 +321,7 @@ app.put('/api/index', async (req, res) => {
   const { fields, indexName } = req.body;
   try {
     const schema = getSchema(fields);
-    await rc.ft.alter('idx:' + indexName, schema);
+    await rc.ft.alter(`${INDEX_NAME_PREFIX}:${indexName}`, schema);
     res.sendStatus(200);
   } catch (e) {
     logger.log('error', '%s\n%s', e, e.stack);
@@ -291,17 +332,14 @@ app.put('/api/index', async (req, res) => {
 });
 
 app.post('/api/index', async (req, res) => {
-  // logger.log('debug', 'body: ', req.body);
+  logger.log('debug', 'body: ', req.body);
   const { fields, indexName } = req.body;
   try {
     const prefix = 'vs:' + indexName;
     const schema = getSchema(fields);
-    schema['__uid'] = {
-      type: 'TAG',
-    };
     logger.log('debug', 'schema: ', schema);
 
-    const name = 'idx:' + indexName;
+    const name = `${INDEX_NAME_PREFIX}:${indexName}`;
     await rc.ft.create(name, schema, {
       ON: 'HASH',
       PREFIX: prefix,
@@ -329,7 +367,7 @@ app.post('/api/index', async (req, res) => {
 app.delete('/api/index/:name', async (req, res) => {
   const { name } = req.params;
   try {
-    await rc.ft.dropIndex(name);
+    await rc.ft.dropIndex(`${INDEX_NAME_PREFIX}:${name}`);
     res.json({ status: 'OK' });
   } catch (e) {
     logger.log('error', '%s\n%s', e, e.stack);
@@ -384,30 +422,31 @@ app.post('/api/parent-documents', async (req, res) => {
 });
 
 app.post('/api/document', async (req, res) => {
-  const { documents, indexName } = req.body;
+  const { documents, indexName, nodeLabel } = req.body;
   logger.log('debug', 'indexName: %s', indexName);
+  logger.log('debug', 'documents: %s', JSON.stringify(documents, null, 2));
   const prefix = 'vs:' + indexName;
   try {
     const fields = await getIndexFields(indexName);
     const fieldNames = Object.keys(fields);
-    // logger.log('debug', 'fields:', fields);
-    // logger.log('debug', 'fieldNames:', fieldNames);
+    logger.log('debug', 'fields:', fields);
+    logger.log('debug', 'fieldNames:', fieldNames);
     for (const document of documents) {
-      // logger.log('debug', 'document:', document);
+      logger.log('debug', 'document:', document);
       const documentKeys = Object.keys(document);
       const data = {};
-      // logger.log('debug', 'documentKeys:', documentKeys);
+      logger.log('debug', 'documentKeys:', documentKeys);
       for (let j = 0; j < fieldNames.length; j++) {
         const name = fieldNames[j];
         const field = fields[name];
         for (let i = 0; i < documentKeys.length; i++) {
           const k = documentKeys[i];
           const v = document[k];
-          if (field.type === 'VECTOR' && name.slice(0, -4) === k) {
+          if (field.type === 'VECTOR' && name.slice(0, -4) === k.replace(/\./g, '__')) {
             const embedding = await getEmbedding(v);
             data[name] = float32Buffer(embedding);
             break;
-          } else if (name === k.toLowerCase()) {
+          } else if (name === k.replace(/\./g, '__') && v !== null) {
             if (Array.isArray(v)) {
               data[name] = v.join(',');
             } else if (field.type === 'NUMERIC') {
@@ -421,10 +460,11 @@ app.post('/api/document', async (req, res) => {
           }
         }
       }
-      const uid = data.content_uid || uuid.v4();
-      data['__uid'] = uid;
-      // logger.log('debug', '\ndocument: %s\ndata: %s', document, data);
-      await rc.hSet(`${prefix}:${uid}`, data);
+      // const uid = data.content_uid || uuid.v4();
+      // data['__uid'] = uid;
+      logger.log('debug', 'data: %s', data);
+      const id = document[nodeLabel + '.id'];
+      await rc.hSet(`${prefix}:${id}`, data);
     }
     res.sendStatus(200);
   } catch (e) {
@@ -569,7 +609,7 @@ app.post('/api/search/:indexName', async (req, res, next) => {
   logger.log('debug', 'requests: ', requests);
   logger.log('debug', 'query: %s', requests[0].params.query);
   const rawResult = await rc.ft.search(
-    'idx:' + indexName,
+    `${INDEX_NAME_PREFIX}:${indexName}`,
     requests[0].params.query
   );
   logger.log('debug', 'rawResult: ', rawResult);
@@ -632,7 +672,7 @@ const getEmbedding = async (text) => {
 };
 
 const getIndexFields = async (indexName) => {
-  const index = await rc.ft.info('idx:' + indexName);
+  const index = await rc.ft.info(`${INDEX_NAME_PREFIX}:${indexName}`);
   const fields = index.attributes.reduce((a, x) => {
     a[x.attribute] = {
       type: x.type,
@@ -658,13 +698,14 @@ const getModel = async () => {
 
 const getSchema = (fields) => {
   return Object.entries(fields).reduce((a, [k, v]) => {
+    const key = k.replace(/\./g, '__');
     const type = getType(v.type);
     if (v.type === 'VECTOR') {
-      a[k] = {
+      a[key] = {
         type: SchemaFieldTypes.TEXT,
         sortable: !!v.sortable,
       };
-      a[k + '_vec'] = {
+      a[key + '_vec'] = {
         type,
         ALGORITHM: VectorAlgorithms.HNSW,
         TYPE: 'FLOAT32',
@@ -672,7 +713,7 @@ const getSchema = (fields) => {
         DISTANCE_METRIC: 'L2',
       };
     } else {
-      a[k] = {
+      a[key] = {
         type,
         sortable: !!v.sortable,
       };

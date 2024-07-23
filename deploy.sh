@@ -7,4 +7,4 @@ context=$K8S_CONTEXT
 kubectl config use-context $context
 kubectl config set-context --current --namespace="${ns}"
 
-helm upgrade --install $app -n $ns --set db.user="${DBUSER}" --set db.pass="${DBPASS}" -f $HELM_VALUES_FILE ./helm-chart
+helm upgrade --install $app -n $ns -f $HELM_VALUES_FILE ./helm-chart

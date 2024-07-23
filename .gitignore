@@ -6,3 +6,4 @@ volumes/
 *.csv
 helm-chart/values.yaml
 *.env
+.env.prod
